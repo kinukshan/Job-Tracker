@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Secrets — NEVER commit this
+.env
+
+# Logs (local only — GitHub Actions uploads them as artifacts)
+logs/
+
+# Generated preview files
+email_preview.html
+
+# macOS
+.DS_Store
+
+# SQLite WAL journal files (transient, not needed in repo)
+data/*.db-shm
+data/*.db-wal
+
+# The database file itself IS tracked so GitHub Actions can persist state.
+# Explicitly un-ignore it here.
+!data/listings.db
+
+# IDE
+.vscode/
+.idea/

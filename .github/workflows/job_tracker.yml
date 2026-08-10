@@ -1,0 +1,135 @@
+# .github/workflows/job_tracker.yml
+# -----------------------------------
+# Runs the LinkedIn Job Tracker on a schedule and commits the updated
+# SQLite database back to the repo so state persists across ephemeral runners.
+#
+# Required GitHub Secrets (Settings → Secrets and variables → Actions → New secret):
+#   SMTP_USER        — your Gmail address (e.g. you@gmail.com)
+#   SMTP_PASSWORD    — your 16-char Gmail App Password
+#   EMAIL_RECIPIENT  — destination address for job alerts
+#
+# Optional GitHub Secrets:
+#   SMTP_HOST        — defaults to smtp.gmail.com
+#   SMTP_PORT        — defaults to 587
+
+name: LinkedIn Job Tracker
+
+on:
+  # ── Scheduled runs ───────────────────────────────────────────────────────
+  schedule:
+    # Every 30 minutes, 24/7.
+    # GitHub Actions cron uses UTC. Adjust if you want to limit to waking hours.
+    # Format: minute hour day-of-month month day-of-week
+    - cron: "*/30 * * * *"
+
+  # ── Manual trigger ────────────────────────────────────────────────────────
+  # Lets you run the workflow from the GitHub UI (Actions tab → Run workflow)
+  # without waiting for the schedule. Useful for testing.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (fetch + diff, skip email and DB write)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      force_notify:
+        description: "Force notification even if no new listings found"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+# Prevent concurrent runs from corrupting the database or sending duplicate emails.
+concurrency:
+  group: job-tracker-run
+  cancel-in-progress: false   # don't cancel a running check — let it finish
+
+jobs:
+  track:
+    name: Fetch, Diff & Notify
+    runs-on: ubuntu-latest
+
+    # Grant write permission so the job can commit the updated DB back.
+    permissions:
+      contents: write
+
+    steps:
+      # ── 1. Check out the repo ──────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history so we can commit back cleanly.
+          fetch-depth: 1
+
+      # ── 2. Set up Python ───────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"            # cache pip downloads between runs
+
+      # ── 3. Install dependencies ────────────────────────────────────────
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 4. Run the tracker ────────────────────────────────────────────
+      # All secrets are injected as environment variables.
+      # main.py reads them via config.py → os.environ.get(...)
+      - name: Run job tracker
+        env:
+          SMTP_USER:        ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD:    ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_RECIPIENT:  ${{ secrets.EMAIL_RECIPIENT }}
+          SMTP_HOST:        ${{ secrets.SMTP_HOST }}        # optional
+          SMTP_PORT:        ${{ secrets.SMTP_PORT }}        # optional
+        run: |
+          # Build CLI flags from workflow_dispatch inputs (empty for scheduled runs)
+          EXTRA_FLAGS=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            EXTRA_FLAGS="$EXTRA_FLAGS --dry-run"
+          fi
+          if [ "${{ github.event.inputs.force_notify }}" = "true" ]; then
+            EXTRA_FLAGS="$EXTRA_FLAGS --force-notify"
+          fi
+
+          python main.py --verbose $EXTRA_FLAGS
+
+      # ── 5. Commit the updated database back to the repo ───────────────
+      # This is the "commit-back" persistence pattern: since GitHub Actions
+      # runners are ephemeral, we store state directly in the repository.
+      # The data/ directory holds the SQLite DB and is gitignored by default
+      # EXCEPT for the DB file itself (see .gitignore).
+      - name: Commit updated database
+        # Only commit if the DB actually changed (new listings were found).
+        # Using `git diff --quiet` to detect changes before committing.
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage only the database file
+          git add data/listings.db || true
+
+          # Check if there's anything new to commit
+          if git diff --cached --quiet; then
+            echo "No new listings — database unchanged, skipping commit."
+          else
+            git commit -m "chore: update listings.db [skip ci]"
+            git push
+            echo "Database updated and pushed to repository."
+          fi
+
+      # ── 6. Upload log as artifact ─────────────────────────────────────
+      # Logs are retained for 14 days so you can inspect any failed run.
+      - name: Upload run log
+        if: always()    # upload even if a previous step failed
+        uses: actions/upload-artifact@v4
+        with:
+          name: tracker-log-${{ github.run_id }}
+          path: logs/tracker.log
+          retention-days: 14
+          if-no-files-found: ignore
